@@ -12,8 +12,15 @@ const (
 	// ReasonEntityNotFound means the referenced entity does not exist.
 	ReasonEntityNotFound Reason = "entity_not_found"
 	// ReasonIncompatibleChange means the new spec removes fields,
-	// changes field semantics or introduces other breaking changes.
+	// changes field semantics or introduces other breaking changes
+	// relative to the reporting source's own previous contribution.
 	ReasonIncompatibleChange Reason = "incompatible_change"
+	// ReasonSourceConflict means the report clashes with contributions
+	// of *other* sources of the same entity (e.g. disagreeing field
+	// types, or an explicit drop of a field another source still
+	// reports). The Conflicts carry the responsible source, field and
+	// conflict kind so the teams can be aligned directly.
+	ReasonSourceConflict Reason = "source_conflict"
 	// ReasonDuplicateReport means the reported spec is identical to the
 	// current state; it is recorded nowhere and history is untouched.
 	ReasonDuplicateReport Reason = "duplicate_report"
@@ -29,8 +36,11 @@ const (
 )
 
 // Conflict describes one concrete difference that makes an evolution
-// incompatible. It lets callers assert *why* a report was rejected.
+// or a multi-source merge incompatible. It lets callers assert *why*
+// a report was rejected.
 type Conflict struct {
+	// Source is the source whose report triggered the conflict.
+	Source string `json:"source,omitempty"`
 	Field  string `json:"field"`
 	Kind   string `json:"kind"` // "field_removed", "type_changed", "required_added", "semantic_changed"
 	Detail string `json:"detail"`

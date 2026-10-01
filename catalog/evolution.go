@@ -37,6 +37,19 @@ func validateSpec(spec EntitySpec) error {
 		}
 		seen[f.Name] = true
 	}
+	dropped := map[string]bool{}
+	for _, d := range spec.DropFields {
+		if strings.TrimSpace(d) == "" {
+			return errf(ReasonInvalidSpec, "entity %q drops a field with empty name", spec.Name)
+		}
+		if dropped[d] {
+			return errf(ReasonInvalidSpec, "entity %q drops field %q more than once", spec.Name, d)
+		}
+		dropped[d] = true
+		if seen[d] {
+			return errf(ReasonInvalidSpec, "entity %q both declares and drops field %q", spec.Name, d)
+		}
+	}
 	return nil
 }
 
@@ -64,6 +77,13 @@ type evolutionResult struct {
 
 // diffSpecs compares the current spec with a newly reported one.
 //
+// It is a thin single-source adapter over the multi-source merge
+// engine (mergeReport): the old spec is treated as the only stored
+// contribution, so the result is exactly what merging the new report
+// from the same source would produce. Kind changes cannot occur
+// through Register (kind is part of the entity identity), so the
+// semantic_changed check lives here directly.
+//
 // Compatibility rules:
 //   - adding an optional field is compatible;
 //   - removing a field is incompatible (field_removed);
@@ -78,59 +98,6 @@ type evolutionResult struct {
 func diffSpecs(old, new EntitySpec) evolutionResult {
 	res := evolutionResult{}
 
-	oldFields := map[string]FieldSpec{}
-	for _, f := range old.Fields {
-		oldFields[f.Name] = f
-	}
-	newFields := map[string]FieldSpec{}
-	for _, f := range new.Fields {
-		newFields[f.Name] = f
-	}
-
-	var added, removed, changed []string
-
-	// Fields present before: removal and modification.
-	for name, of := range oldFields {
-		nf, ok := newFields[name]
-		switch {
-		case !ok:
-			res.conflicts = append(res.conflicts, Conflict{
-				Field:  name,
-				Kind:   conflictFieldRemoved,
-				Detail: "field existed in the previous version and was removed",
-			})
-			removed = append(removed, name)
-		case nf.Type != of.Type:
-			res.conflicts = append(res.conflicts, Conflict{
-				Field:  name,
-				Kind:   conflictTypeChanged,
-				Detail: "type changed from " + string(of.Type) + " to " + string(nf.Type),
-			})
-		case !of.Required && nf.Required:
-			res.conflicts = append(res.conflicts, Conflict{
-				Field:  name,
-				Kind:   conflictRequiredAdded,
-				Detail: "optional field tightened to required",
-			})
-		}
-	}
-
-	// Fields present now: additions.
-	for name, nf := range newFields {
-		if _, ok := oldFields[name]; !ok {
-			if nf.Required {
-				res.conflicts = append(res.conflicts, Conflict{
-					Field:  name,
-					Kind:   conflictRequiredAdded,
-					Detail: "new field is declared required",
-				})
-			} else {
-				added = append(added, name)
-			}
-		}
-	}
-
-	// Entity-level semantic change.
 	if old.Kind != new.Kind {
 		res.conflicts = append(res.conflicts, Conflict{
 			Field:  "kind",
@@ -139,27 +106,21 @@ func diffSpecs(old, new EntitySpec) evolutionResult {
 		})
 	}
 
-	// Compatible metadata changes.
-	if old.Description != new.Description {
-		changed = append(changed, "description")
+	rec := &entityRecord{
+		current: Entity{
+			ID:   entityID(old.Kind, old.Name),
+			Name: old.Name,
+			Kind: old.Kind,
+		},
+		sources: map[string]*SourceContribution{
+			old.Source: {Source: old.Source, Spec: old},
+		},
 	}
-	if !sameStringSet(old.Owners, new.Owners) {
-		changed = append(changed, "owners")
-	}
-	if !sameStringSet(old.Tags, new.Tags) {
-		changed = append(changed, "tags")
-	}
-	if len(added) > 0 {
-		changed = append(changed, "fields added: "+joinSorted(added))
-	}
-	if len(removed) > 0 {
-		changed = append(changed, "fields removed: "+joinSorted(removed))
-	}
-
-	res.changed = len(changed) > 0 || len(res.conflicts) > 0
-	res.duplicate = !res.changed
-	sort.Strings(changed)
-	res.reason = strings.Join(changed, "; ")
+	out := mergeReport(rec, new)
+	res.duplicate = out.duplicate
+	res.conflicts = append(res.conflicts, out.conflicts...)
+	res.changed = !out.duplicate
+	res.reason = out.reason
 	return res
 }
 

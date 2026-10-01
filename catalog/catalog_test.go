@@ -112,11 +112,6 @@ func TestIncompatibleEvolution(t *testing.T) {
 			},
 			wantReason: ReasonIncompatibleChange, wantField: "tenant", wantKind: conflictRequiredAdded,
 		},
-		{
-			name:       "change entity kind",
-			mutate:     func(s *EntitySpec) { s.Kind = "view" },
-			wantReason: ReasonIncompatibleChange, wantField: "kind", wantKind: conflictSemanticChanged,
-		},
 	}
 	for _, tc := range cases {
 		spec := baseSpec()
@@ -254,7 +249,7 @@ func TestSearchReflectsLatestState(t *testing.T) {
 	// Search by keyword on a field name.
 	res, _ := c.Search(SearchQuery{Keyword: "amount"})
 	t.Logf("input: keyword='amount' -> verdict: %d hit(s)", len(res))
-	if len(res) != 1 || res[0].ID != entityID(spec.Source, spec.Name) {
+	if len(res) != 1 || res[0].ID != entityID(spec.Kind, spec.Name) {
 		t.Fatalf("expected 1 hit, got %v", res)
 	}
 
@@ -285,7 +280,7 @@ func TestSearchReflectsLatestState(t *testing.T) {
 func TestConcurrentNoLostUpdate(t *testing.T) {
 	c := New()
 	mustRegister(t, c, baseSpec())
-	id := entityID(baseSpec().Source, baseSpec().Name)
+	id := entityID(baseSpec().Kind, baseSpec().Name)
 
 	const n = 20
 	var wg sync.WaitGroup
@@ -347,7 +342,7 @@ func TestConcurrentNoLostUpdate(t *testing.T) {
 func TestConcurrentReadsDuringWrites(t *testing.T) {
 	c := New()
 	mustRegister(t, c, baseSpec())
-	id := entityID(baseSpec().Source, baseSpec().Name)
+	id := entityID(baseSpec().Kind, baseSpec().Name)
 
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
@@ -438,7 +433,7 @@ func TestConcurrentReadsDuringWrites(t *testing.T) {
 func TestVersionConflictNoUpdate(t *testing.T) {
 	c := New()
 	mustRegister(t, c, baseSpec())
-	id := entityID(baseSpec().Source, baseSpec().Name)
+	id := entityID(baseSpec().Kind, baseSpec().Name)
 
 	next := baseSpec()
 	next.Fields = append(next.Fields, FieldSpec{Name: "note", Type: TypeString})

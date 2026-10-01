@@ -1,10 +1,14 @@
 package catalog
 
-// entityRecord bundles the current state of an entity with its
-// immutable version history.
+import "strings"
+
+// entityRecord bundles the current merged state of an entity with its
+// immutable version history and the per-source contributions.
 type entityRecord struct {
 	current Entity
 	history []EntityVersion
+	// sources maps source name -> that source's last accepted report.
+	sources map[string]*SourceContribution
 }
 
 // store is the in-process local storage of the catalog. It is only
@@ -24,11 +28,20 @@ func newStore() *store {
 	}
 }
 
-// entityID derives the stable identity of an entity from its source
-// and name. The same (source, name) pair always maps to the same ID,
-// which is what makes repeated reports idempotent.
-func entityID(source, name string) string {
-	return source + "/" + name
+// entityID derives the stable identity of a logical entity from its
+// kind and name, independent of which source reports it. The rule is
+// deliberately simple and explainable:
+//
+//	ID = kind + "/" + name, both trimmed and lower-cased.
+//
+// Two reports refer to the same entity iff they agree on kind and
+// (normalised) name. Same-named entities of different kinds (e.g. a
+// table "users" and a topic "users") are NOT merged; they are
+// independent records.
+func entityID(kind, name string) string {
+	k := strings.ToLower(strings.TrimSpace(kind))
+	n := strings.ToLower(strings.TrimSpace(name))
+	return k + "/" + n
 }
 
 func edgeKey(upstreamID, downstreamID string) string {
@@ -41,10 +54,11 @@ func (s *store) get(id string) (*entityRecord, bool) {
 }
 
 // putNew inserts a brand-new entity with version 1.
-func (s *store) putNew(e Entity, v EntityVersion) {
+func (s *store) putNew(e Entity, v EntityVersion, contrib *SourceContribution) {
 	s.entities[e.ID] = &entityRecord{
 		current: e,
 		history: []EntityVersion{v},
+		sources: map[string]*SourceContribution{contrib.Source: contrib},
 	}
 }
 

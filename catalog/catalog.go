@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -20,16 +21,22 @@ func New() *Catalog {
 	return &Catalog{st: newStore()}
 }
 
-// Register registers a new entity or reports a new version of an
+// Register registers a new entity or merges a new report of an
 // existing one. It performs an unconditional (last-writer) commit.
 //
-//   - A spec identical to the current state is rejected with
-//     ReasonDuplicateReport; nothing is written and history is
-//     untouched.
-//   - An incompatible evolution (field removed, type changed,
-//     required added, kind changed) is rejected with
-//     ReasonIncompatibleChange and the concrete Conflicts.
-//   - A compatible evolution is committed as a new version.
+//   - Reports from every source of the same logical entity (same
+//     kind + normalised name, see entityID) are merged into one
+//     record; each source's contribution is tracked separately.
+//   - A report identical to what its source already contributed is
+//     rejected with ReasonDuplicateReport; nothing is written,
+//     history is untouched and no timestamp is refreshed.
+//   - A report that clashes with its own source's previous
+//     contribution (field removed, type changed, required added) is
+//     rejected with ReasonIncompatibleChange; a report that clashes
+//     with *other* sources (disagreeing types, explicit drops) is
+//     rejected with ReasonSourceConflict. Both carry the concrete
+//     Conflicts with source, field and kind.
+//   - A compatible report is merged and committed as a new version.
 func (c *Catalog) Register(spec EntitySpec) (*Entity, error) {
 	return c.RegisterAt(spec, -1)
 }
@@ -54,7 +61,7 @@ func (c *Catalog) RegisterAt(spec EntitySpec, expectedVersion int) (*Entity, err
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	id := entityID(spec.Source, spec.Name)
+	id := entityID(spec.Kind, spec.Name)
 	now := time.Now().UTC()
 
 	rec, exists := c.st.get(id)
@@ -71,65 +78,68 @@ func (c *Catalog) RegisterAt(spec EntitySpec, expectedVersion int) (*Entity, err
 			"entity %q: expected version %d but current version is %d", id, expectedVersion, current)
 	}
 
-	if !exists {
-		e := Entity{
-			ID:          id,
-			Name:        spec.Name,
-			Source:      spec.Source,
-			Kind:        spec.Kind,
-			Description: spec.Description,
-			Owners:      cloneStrings(spec.Owners),
-			Tags:        cloneStrings(spec.Tags),
-			Fields:      cloneFields(spec.Fields),
-			Version:     1,
-			CreatedAt:   now,
-			UpdatedAt:   now,
+	var recArg *entityRecord
+	if exists {
+		recArg = rec
+	}
+	out := mergeReport(recArg, cloneSpec(spec))
+	switch {
+	case out.duplicate:
+		version := 0
+		if exists {
+			version = rec.current.Version
 		}
+		return nil, errf(ReasonDuplicateReport,
+			"entity %q: report identical to the stored contribution of source %q (version %d)",
+			id, spec.Source, version)
+	case out.invalid != nil:
+		return nil, out.invalid
+	case len(out.conflicts) > 0:
+		reason := ReasonIncompatibleChange
+		if out.cross {
+			reason = ReasonSourceConflict
+		}
+		return nil, &CatalogError{
+			Reason:    reason,
+			Message:   "entity " + id + ": report from source " + spec.Source + " rejected",
+			Conflicts: out.conflicts,
+		}
+	}
+
+	e := out.entity
+	e.UpdatedAt = now
+	if !exists {
+		e.Version = 1
+		e.CreatedAt = now
 		c.st.putNew(e, EntityVersion{
 			Version:   1,
-			Spec:      cloneSpec(spec),
+			Source:    spec.Source,
+			Spec:      out.mergedSpec,
 			CreatedAt: now,
-			Reason:    "initial registration",
+			Reason:    out.reason,
+		}, &SourceContribution{
+			Source:     spec.Source,
+			Spec:       cloneSpec(spec),
+			ReportedAt: now,
 		})
-		out := e
-		return &out, nil
-	}
-
-	current := rec.history[len(rec.history)-1].Spec
-	res := diffSpecs(current, spec)
-	switch {
-	case res.duplicate:
-		return nil, errf(ReasonDuplicateReport,
-			"entity %q: report identical to current version %d", id, rec.current.Version)
-	case len(res.conflicts) > 0:
-		return nil, &CatalogError{
-			Reason:    ReasonIncompatibleChange,
-			Message:   "entity " + id + ": incompatible evolution",
-			Conflicts: res.conflicts,
+	} else {
+		e.Version = rec.current.Version + 1
+		e.CreatedAt = rec.current.CreatedAt
+		c.st.applyVersion(rec, e, EntityVersion{
+			Version:   e.Version,
+			Source:    spec.Source,
+			Spec:      out.mergedSpec,
+			CreatedAt: now,
+			Reason:    out.reason,
+		})
+		rec.sources[spec.Source] = &SourceContribution{
+			Source:     spec.Source,
+			Spec:       cloneSpec(spec),
+			ReportedAt: now,
 		}
 	}
-
-	e := Entity{
-		ID:          id,
-		Name:        spec.Name,
-		Source:      spec.Source,
-		Kind:        spec.Kind,
-		Description: spec.Description,
-		Owners:      cloneStrings(spec.Owners),
-		Tags:        cloneStrings(spec.Tags),
-		Fields:      cloneFields(spec.Fields),
-		Version:     rec.current.Version + 1,
-		CreatedAt:   rec.current.CreatedAt,
-		UpdatedAt:   now,
-	}
-	c.st.applyVersion(rec, e, EntityVersion{
-		Version:   e.Version,
-		Spec:      cloneSpec(spec),
-		CreatedAt: now,
-		Reason:    res.reason,
-	})
-	out := e
-	return &out, nil
+	cp := cloneEntity(e)
+	return &cp, nil
 }
 
 // Get returns a copy of the current state of an entity.
@@ -155,6 +165,30 @@ func (c *Catalog) History(id string) ([]EntityVersion, error) {
 	}
 	out := make([]EntityVersion, len(rec.history))
 	copy(out, rec.history)
+	return out, nil
+}
+
+// Contributions returns the last accepted report of every source of
+// an entity, sorted by source name: what each source reported and
+// when it was committed. Identical re-reports are rejected as
+// duplicates, so a contribution's ReportedAt is never refreshed by
+// repeated identical reports.
+func (c *Catalog) Contributions(id string) ([]SourceContribution, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	rec, ok := c.st.get(id)
+	if !ok {
+		return nil, errf(ReasonEntityNotFound, "entity %q not found", id)
+	}
+	out := make([]SourceContribution, 0, len(rec.sources))
+	for _, s := range rec.sources {
+		out = append(out, SourceContribution{
+			Source:     s.Source,
+			Spec:       cloneSpec(s.Spec),
+			ReportedAt: s.ReportedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Source < out[j].Source })
 	return out, nil
 }
 
@@ -237,7 +271,22 @@ func cloneEntity(e Entity) Entity {
 	e.Owners = cloneStrings(e.Owners)
 	e.Tags = cloneStrings(e.Tags)
 	e.Fields = cloneFields(e.Fields)
+	e.Sources = cloneStrings(e.Sources)
+	e.FieldSources = cloneStringMap(e.FieldSources)
+	e.OwnerSources = cloneStringMap(e.OwnerSources)
+	e.TagSources = cloneStringMap(e.TagSources)
 	return e
+}
+
+func cloneStringMap(in map[string][]string) map[string][]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		out[k] = cloneStrings(v)
+	}
+	return out
 }
 
 func cloneSpec(s EntitySpec) EntitySpec {

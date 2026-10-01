@@ -28,8 +28,11 @@ type FieldSpec struct {
 	Description string    `json:"description"`
 }
 
-// EntitySpec is the full specification of an entity as reported by a
-// producer (a source at a point in time).
+// EntitySpec is the specification of an entity as reported by one
+// producer (a source at a point in time). A report is *partial*: it
+// only covers the fields/owners/tags that this source cares about.
+// The catalog merges reports from all sources of the same logical
+// entity into one record.
 type EntitySpec struct {
 	Name        string      `json:"name"`
 	Source      string      `json:"source"`
@@ -38,30 +41,59 @@ type EntitySpec struct {
 	Owners      []string    `json:"owners"`
 	Tags        []string    `json:"tags"`
 	Fields      []FieldSpec `json:"fields"`
+	// DropFields explicitly asks to remove fields from the entity.
+	// Field removal is a breaking change, so any non-empty DropFields
+	// rejects the whole report with a field_removed conflict. A field
+	// that is merely absent from Fields is NOT treated as dropped
+	// ("not mentioned" != "deleted").
+	DropFields []string `json:"drop_fields,omitempty"`
 }
 
-// Entity is the catalog's current view of a registered entity.
+// Entity is the catalog's current view of a registered entity: the
+// merged state across all contributing sources.
 type Entity struct {
 	ID          string      `json:"id"`
 	Name        string      `json:"name"`
-	Source      string      `json:"source"`
 	Kind        string      `json:"kind"`
 	Description string      `json:"description"`
 	Owners      []string    `json:"owners"`
 	Tags        []string    `json:"tags"`
 	Fields      []FieldSpec `json:"fields"`
-	Version     int         `json:"version"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	// Sources lists every source that currently contributes to this
+	// entity, sorted alphabetically.
+	Sources []string `json:"sources"`
+	// FieldSources maps a field name to the sources that report it.
+	FieldSources map[string][]string `json:"field_sources,omitempty"`
+	// OwnerSources maps an owner to the sources that report it.
+	OwnerSources map[string][]string `json:"owner_sources,omitempty"`
+	// TagSources maps a tag to the sources that report it.
+	TagSources map[string][]string `json:"tag_sources,omitempty"`
+
+	Version   int       `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // EntityVersion is one immutable point in the version history of an
 // entity.
 type EntityVersion struct {
-	Version   int        `json:"version"`
+	Version int `json:"version"`
+	// Source is the source whose report produced this version.
+	Source string `json:"source"`
+	// Spec is the merged state right after this version was committed.
 	Spec      EntitySpec `json:"spec"`
 	CreatedAt time.Time  `json:"created_at"`
 	Reason    string     `json:"reason"`
+}
+
+// SourceContribution is the last accepted report of one source for
+// one entity, together with the time it was committed. Re-reporting
+// identical content is rejected as a duplicate and neither rewrites
+// the contribution nor refreshes ReportedAt.
+type SourceContribution struct {
+	Source     string     `json:"source"`
+	Spec       EntitySpec `json:"spec"`
+	ReportedAt time.Time  `json:"reported_at"`
 }
 
 // LineageEdge represents one directed producer -> consumer dependency.
