@@ -21,6 +21,9 @@ func validateSpec(spec EntitySpec) error {
 	if strings.TrimSpace(spec.Name) == "" {
 		return errf(ReasonInvalidSpec, "entity name must not be empty")
 	}
+	if strings.Contains(spec.Name, "/") {
+		return errf(ReasonInvalidSpec, "entity name %q must not contain '/'", spec.Name)
+	}
 	if strings.TrimSpace(spec.Source) == "" {
 		return errf(ReasonInvalidSpec, "entity source must not be empty")
 	}
@@ -37,10 +40,19 @@ func validateSpec(spec EntitySpec) error {
 		}
 		seen[f.Name] = true
 	}
+	for _, name := range spec.RemovedFields {
+		if strings.TrimSpace(name) == "" {
+			return errf(ReasonInvalidSpec, "entity %q has a removed field with empty name", spec.Name)
+		}
+		if seen[name] {
+			return errf(ReasonInvalidSpec,
+				"entity %q both declares and removes field %q", spec.Name, name)
+		}
+	}
 	return nil
 }
 
-// conflict kinds emitted by diffSpecs.
+// conflict kinds emitted by mergeReport and diffSpecs.
 const (
 	conflictFieldRemoved    = "field_removed"
 	conflictTypeChanged     = "type_changed"
@@ -62,7 +74,10 @@ type evolutionResult struct {
 	reason string
 }
 
-// diffSpecs compares the current spec with a newly reported one.
+// diffSpecs compares the current spec with a newly reported one from
+// the same source. It is the single-source special case of the
+// multi-source merge (see mergeReport): the current spec is treated
+// as this source's only contribution.
 //
 // Compatibility rules:
 //   - adding an optional field is compatible;
@@ -76,90 +91,14 @@ type evolutionResult struct {
 //
 // Ordering inside fields, owners and tags is insignificant.
 func diffSpecs(old, new EntitySpec) evolutionResult {
-	res := evolutionResult{}
-
-	oldFields := map[string]FieldSpec{}
-	for _, f := range old.Fields {
-		oldFields[f.Name] = f
+	mr := mergeReport(old, map[string]EntitySpec{new.Source: old}, new)
+	res := evolutionResult{
+		duplicate: mr.duplicate,
+		conflicts: mr.conflicts,
+		changed:   mr.changed || len(mr.conflicts) > 0,
+		reason:    mr.reason,
 	}
-	newFields := map[string]FieldSpec{}
-	for _, f := range new.Fields {
-		newFields[f.Name] = f
-	}
-
-	var added, removed, changed []string
-
-	// Fields present before: removal and modification.
-	for name, of := range oldFields {
-		nf, ok := newFields[name]
-		switch {
-		case !ok:
-			res.conflicts = append(res.conflicts, Conflict{
-				Field:  name,
-				Kind:   conflictFieldRemoved,
-				Detail: "field existed in the previous version and was removed",
-			})
-			removed = append(removed, name)
-		case nf.Type != of.Type:
-			res.conflicts = append(res.conflicts, Conflict{
-				Field:  name,
-				Kind:   conflictTypeChanged,
-				Detail: "type changed from " + string(of.Type) + " to " + string(nf.Type),
-			})
-		case !of.Required && nf.Required:
-			res.conflicts = append(res.conflicts, Conflict{
-				Field:  name,
-				Kind:   conflictRequiredAdded,
-				Detail: "optional field tightened to required",
-			})
-		}
-	}
-
-	// Fields present now: additions.
-	for name, nf := range newFields {
-		if _, ok := oldFields[name]; !ok {
-			if nf.Required {
-				res.conflicts = append(res.conflicts, Conflict{
-					Field:  name,
-					Kind:   conflictRequiredAdded,
-					Detail: "new field is declared required",
-				})
-			} else {
-				added = append(added, name)
-			}
-		}
-	}
-
-	// Entity-level semantic change.
-	if old.Kind != new.Kind {
-		res.conflicts = append(res.conflicts, Conflict{
-			Field:  "kind",
-			Kind:   conflictSemanticChanged,
-			Detail: "kind changed from " + old.Kind + " to " + new.Kind,
-		})
-	}
-
-	// Compatible metadata changes.
-	if old.Description != new.Description {
-		changed = append(changed, "description")
-	}
-	if !sameStringSet(old.Owners, new.Owners) {
-		changed = append(changed, "owners")
-	}
-	if !sameStringSet(old.Tags, new.Tags) {
-		changed = append(changed, "tags")
-	}
-	if len(added) > 0 {
-		changed = append(changed, "fields added: "+joinSorted(added))
-	}
-	if len(removed) > 0 {
-		changed = append(changed, "fields removed: "+joinSorted(removed))
-	}
-
-	res.changed = len(changed) > 0 || len(res.conflicts) > 0
 	res.duplicate = !res.changed
-	sort.Strings(changed)
-	res.reason = strings.Join(changed, "; ")
 	return res
 }
 

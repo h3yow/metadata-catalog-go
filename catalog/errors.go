@@ -29,8 +29,11 @@ const (
 )
 
 // Conflict describes one concrete difference that makes an evolution
-// incompatible. It lets callers assert *why* a report was rejected.
+// or a cross-source merge incompatible. It lets callers assert *why*
+// a report was rejected and *who* to talk to.
 type Conflict struct {
+	// Source is the reporting source responsible for the conflict.
+	Source string `json:"source,omitempty"`
 	Field  string `json:"field"`
 	Kind   string `json:"kind"` // "field_removed", "type_changed", "required_added", "semantic_changed"
 	Detail string `json:"detail"`

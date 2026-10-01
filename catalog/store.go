@@ -1,10 +1,18 @@
 package catalog
 
-// entityRecord bundles the current state of an entity with its
-// immutable version history.
+import "strings"
+
+// entityRecord bundles the current merged state of an entity with its
+// immutable version history, the latest accepted report of every
+// contributing source and the chronological report log.
 type entityRecord struct {
 	current Entity
 	history []EntityVersion
+	// contribs maps source -> that source's last accepted report.
+	contribs map[string]EntitySpec
+	// reports is the accepted-report log across all sources, in
+	// commit order. Rejected and duplicate reports are never logged.
+	reports []SourceReport
 }
 
 // store is the in-process local storage of the catalog. It is only
@@ -24,11 +32,18 @@ func newStore() *store {
 	}
 }
 
-// entityID derives the stable identity of an entity from its source
-// and name. The same (source, name) pair always maps to the same ID,
-// which is what makes repeated reports idempotent.
-func entityID(source, name string) string {
-	return source + "/" + name
+// entityID derives the stable identity of a logical entity from its
+// name alone, never from the reporting source: the same logical
+// entity reported by any number of sources maps to one record.
+//
+// The rule is deliberately conservative: reports with the same
+// (trimmed) name refer to the same logical entity only while their
+// kind agrees; a same-named report with a different kind is rejected
+// as a semantic_changed conflict instead of being silently merged or
+// silently split into a second record. Genuinely different entities
+// must therefore use distinct names (e.g. carry a domain prefix).
+func entityID(name string) string {
+	return strings.TrimSpace(name)
 }
 
 func edgeKey(upstreamID, downstreamID string) string {
@@ -41,18 +56,33 @@ func (s *store) get(id string) (*entityRecord, bool) {
 }
 
 // putNew inserts a brand-new entity with version 1.
-func (s *store) putNew(e Entity, v EntityVersion) {
+func (s *store) putNew(e Entity, v EntityVersion, report SourceReport) {
 	s.entities[e.ID] = &entityRecord{
-		current: e,
-		history: []EntityVersion{v},
+		current:  e,
+		history:  []EntityVersion{v},
+		contribs: map[string]EntitySpec{report.Source: cloneSpec(report.Spec)},
+		reports:  []SourceReport{report},
 	}
 }
 
-// applyVersion replaces the current state and appends to the history
-// atomically (from the caller's perspective, under the catalog lock).
-func (s *store) applyVersion(rec *entityRecord, e Entity, v EntityVersion) {
+// applyVersion replaces the current state, appends to the history,
+// updates the reporting source's contribution and appends to the
+// report log atomically (from the caller's perspective, under the
+// catalog lock).
+func (s *store) applyVersion(rec *entityRecord, e Entity, v EntityVersion, report SourceReport) {
 	rec.current = e
 	rec.history = append(rec.history, v)
+	rec.contribs[report.Source] = cloneSpec(report.Spec)
+	rec.reports = append(rec.reports, report)
+}
+
+// recordReport updates the reporting source's contribution and
+// appends to the report log without touching the current state or
+// history: used when an accepted report leaves the merged state
+// unchanged.
+func (s *store) recordReport(rec *entityRecord, report SourceReport) {
+	rec.contribs[report.Source] = cloneSpec(report.Spec)
+	rec.reports = append(rec.reports, report)
 }
 
 // addEdge inserts a lineage edge. It returns false when the edge
