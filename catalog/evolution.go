@@ -27,6 +27,13 @@ func validateSpec(spec EntitySpec) error {
 	if strings.TrimSpace(spec.Source) == "" {
 		return errf(ReasonInvalidSpec, "entity source must not be empty")
 	}
+	kind := strings.TrimSpace(spec.Kind)
+	if kind == "" {
+		return errf(ReasonInvalidSpec, "entity %q: kind must not be empty (identity is name+kind)", spec.Name)
+	}
+	if strings.ContainsAny(kind, "/.") {
+		return errf(ReasonInvalidSpec, "entity %q: kind %q must contain neither '/' nor '.' (used in entity ID)", spec.Name, spec.Kind)
+	}
 	seen := map[string]bool{}
 	for _, f := range spec.Fields {
 		if strings.TrimSpace(f.Name) == "" {
@@ -79,6 +86,12 @@ type evolutionResult struct {
 // multi-source merge (see mergeReport): the current spec is treated
 // as this source's only contribution.
 //
+// Note on kind: at the catalog level entity identity is (name, kind),
+// so changing the kind names an independent entity rather than an
+// evolution of this one (see entityID). diffSpecs still reports a
+// kind disagreement as semantic_changed, which is the correct verdict
+// for callers that reason about a single fixed entity.
+//
 // Compatibility rules:
 //   - adding an optional field is compatible;
 //   - removing a field is incompatible (field_removed);
@@ -86,6 +99,8 @@ type evolutionResult struct {
 //   - adding a required field, or tightening an optional field to
 //     required, is incompatible (required_added), because existing
 //     producers/consumers cannot satisfy it;
+//   - relaxing required -> optional and updating a field description
+//     are compatible and reflected in the merged state;
 //   - changing the entity kind is incompatible (semantic_changed);
 //   - description / owners / tags changes are always compatible.
 //

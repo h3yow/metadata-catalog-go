@@ -69,21 +69,21 @@ func main() {
 		}
 	}
 	edges := [][2]string{
-		{"orders", "payments"},
-		{"payments", "receipts"},
-		{"receipts", "orders"},
+		{"orders.table", "payments.table"},
+		{"payments.table", "receipts.table"},
+		{"receipts.table", "orders.table"},
 	}
 	for _, p := range edges {
 		if err := c.AddLineage(p[0], p[1], "derived"); err != nil {
 			panic(err)
 		}
 	}
-	err = c.AddLineage("orders", "payments", "derived")
+	err = c.AddLineage("orders.table", "payments.table", "derived")
 	fmt.Printf("5) duplicate edge -> %s\n", reason(err))
 
-	down, _ := c.Downstream("orders")
+	down, _ := c.Downstream("orders.table")
 	fmt.Printf("6) downstream of orders (cycle-safe): %v\n", down.EntityIDs)
-	up, _ := c.Upstream("orders")
+	up, _ := c.Upstream("orders.table")
 	fmt.Printf("   upstream of orders: %v\n", up.EntityIDs)
 
 	hits, _ := c.Search(catalog.SearchQuery{Keyword: "amount"})
@@ -95,16 +95,49 @@ func main() {
 	_, err = c.RegisterAt(stale, 1)
 	fmt.Printf("8) CAS at stale version -> %s\n", reason(err))
 
-	hist, _ := c.History("orders")
+	hist, _ := c.History("orders.table")
 	fmt.Printf("9) orders history versions:")
 	for _, h := range hist {
 		fmt.Printf(" v%d(%s, %q)", h.Version, h.Source, h.Reason)
 	}
 	fmt.Println()
 
-	reps, _ := c.Reports("orders", "bizdb")
+	reps, _ := c.Reports("orders.table", "bizdb")
 	fmt.Printf("10) bizdb's report log: %d entr(ies), first at %v\n",
 		len(reps), reps[0].ReportedAt.Format("15:04:05"))
+
+	// Same-source compatible field adjustment: description update and
+	// required relaxation really change the merged state and history.
+	adjusted := orders
+	adjusted.Fields[1].Description = "settled order amount in account currency"
+	adjusted.Fields[1].Required = false
+	e11, err := c.Register(adjusted)
+	fmt.Printf("11) warehouse updates amount's description and relaxes required -> %s, version %d, amount: required=%v desc=%q\n",
+		reason(err), e11.Version, fieldByNameDemo(e11, "amount").Required,
+		fieldByNameDemo(e11, "amount").Description)
+
+	// Same name, different kind: an independent record.
+	topic := catalog.EntitySpec{
+		Name:   "orders",
+		Source: "kafka",
+		Kind:   "topic",
+		Fields: []catalog.FieldSpec{
+			{Name: "id", Type: catalog.TypeString},
+			{Name: "payload", Type: catalog.TypeJSON},
+		},
+	}
+	e12, err := c.Register(topic)
+	fmt.Printf("12) kafka reports topic 'orders' -> %s, independent id=%s (table stays %s at v%d), topic fields=%d\n",
+		reason(err), e12.ID, e11.ID, e11.Version, len(e12.Fields))
+}
+
+func fieldByNameDemo(e *catalog.Entity, name string) catalog.FieldSpec {
+	for _, f := range e.Fields {
+		if f.Name == name {
+			return f
+		}
+	}
+	return catalog.FieldSpec{}
 }
 
 func reason(err error) string {

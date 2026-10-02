@@ -69,9 +69,9 @@ type Entity struct {
 	OwnerSources map[string][]string `json:"owner_sources,omitempty"`
 	// TagSources maps tag -> sources that listed it (sorted).
 	TagSources map[string][]string `json:"tag_sources,omitempty"`
-	Version     int         `json:"version"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	Version    int                 `json:"version"`
+	CreatedAt  time.Time           `json:"created_at"`
+	UpdatedAt  time.Time           `json:"updated_at"`
 }
 
 // EntityVersion is one immutable point in the version history of an

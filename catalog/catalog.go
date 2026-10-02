@@ -21,21 +21,24 @@ func New() *Catalog {
 }
 
 // Register folds a source's report into the logical entity identified
-// by the report's name. Reports from any number of sources about the
-// same logical entity merge into one record; the merged state is a
-// union, never a last-writer overwrite.
+// by the report's (name, kind) pair. Reports from any number of
+// sources about the same logical entity merge into one record; the
+// merged state is a union, never a last-writer overwrite. Same name
+// with a different kind names an independent entity (e.g. table
+// "orders" vs topic "orders"): the two records, their histories,
+// report logs, search results and lineage never interact.
 //
 //   - A report identical to this source's own last accepted report is
 //     rejected with ReasonDuplicateReport; nothing is written, history
 //     and timestamps are untouched and no source information piles up.
-//   - A report that conflicts with the merged state (kind mismatch,
-//     field type disagreement, required tightening, explicit or
-//     implicit field removal) is rejected with
-//     ReasonIncompatibleChange and Conflicts attributing each
-//     conflict to a source and a field.
-//   - Otherwise the report is merged: fields union with type
-//     agreement, owners/tags union and de-duplicate, and a new
-//     version is committed when the merged state changed.
+//   - A report that conflicts with the merged state (field type
+//     disagreement, required tightening, field removal, ...) is
+//     rejected with ReasonIncompatibleChange and Conflicts
+//     attributing each conflict to a source and a field.
+//   - Compatible adjustments (changed field description, required
+//     relaxed to optional, new optional field, owner/tag/description
+//     metadata) are folded into the merged state and a new version is
+//     committed whenever the merged state changes.
 func (c *Catalog) Register(spec EntitySpec) (*Entity, error) {
 	return c.RegisterAt(spec, -1)
 }
@@ -60,7 +63,7 @@ func (c *Catalog) RegisterAt(spec EntitySpec, expectedVersion int) (*Entity, err
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	id := entityID(spec.Name)
+	id := entityID(spec.Name, spec.Kind)
 	now := time.Now().UTC()
 
 	rec, exists := c.st.get(id)

@@ -38,6 +38,12 @@ type mergeResult struct {
 //     rejected as field_removed as well.
 //   - All contributors of a field must agree on its type; a required
 //     tightening is rejected; kind must match the entity's kind.
+//   - Compatible same-source field adjustments DO take effect: a new
+//     non-empty field description replaces the merged one, and
+//     required -> optional relaxes the merged field. The merged
+//     required flag is the OR of current contributors' attestations,
+//     so the field stays required until the LAST required source
+//     relaxes (the reverse transition is rejected as tightening).
 //   - Owners and tags are unioned and de-duplicated across sources.
 func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec EntitySpec) mergeResult {
 	res := mergeResult{}
@@ -50,6 +56,9 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 	}
 
 	// 2. Entity identity attributes must agree across sources.
+	//    Identity is resolved as (name, kind) by the caller, so a
+	//    report reaching here for the same record already has the
+	//    same kind; this check is the defensive last line.
 	if currentMerged.Kind != spec.Kind {
 		res.conflicts = append(res.conflicts, Conflict{
 			Source: spec.Source,
@@ -82,6 +91,7 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 	// 4. Implicit removal: the source drops a field it contributed
 	//    before and no other source contributes it. (Another source
 	//    not mentioning the field is never a removal.)
+	dropped := map[string]bool{}
 	if reportedBefore {
 		incoming := map[string]bool{}
 		for _, f := range spec.Fields {
@@ -91,6 +101,7 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 			if incoming[of.Name] {
 				continue
 			}
+			dropped[of.Name] = true
 			if contributedByOther(contribs, spec.Source, of.Name) {
 				continue
 			}
@@ -104,12 +115,22 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 	}
 
 	// 5. Fold incoming fields into the merged field set.
+	//
+	// Besides unioning new optional fields, this applies the two
+	// same-source compatible adjustments a re-report may carry:
+	//   - a new non-empty field description replaces the old one;
+	//   - required -> optional relaxes the merged field.
+	// Type disagreement and optional -> required tightening stay
+	// rejected as before.
 	mergedFieldList := cloneFields(currentMerged.Fields)
-	var added []string
+	mergedByIndex := map[string]int{}
+	for i, f := range mergedFieldList {
+		mergedByIndex[f.Name] = i
+	}
+	var added, relaxed, described []string
 	for _, nf := range spec.Fields {
-		mf, ok := mergedFields[nf.Name]
-		switch {
-		case !ok:
+		idx, ok := mergedByIndex[nf.Name]
+		if !ok {
 			if nf.Required {
 				res.conflicts = append(res.conflicts, Conflict{
 					Source: spec.Source,
@@ -121,8 +142,11 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 			}
 			added = append(added, nf.Name)
 			mergedFieldList = append(mergedFieldList, nf)
-			mergedFields[nf.Name] = nf
-		case nf.Type != mf.Type:
+			mergedByIndex[nf.Name] = len(mergedFieldList) - 1
+			continue
+		}
+		mf := mergedFieldList[idx]
+		if nf.Type != mf.Type {
 			res.conflicts = append(res.conflicts, Conflict{
 				Source: spec.Source,
 				Field:  nf.Name,
@@ -130,13 +154,42 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 				Detail: "source " + spec.Source + " reports type " + string(nf.Type) +
 					" but merged state has " + string(mf.Type),
 			})
-		case nf.Required && !mf.Required:
+			continue
+		}
+		if nf.Required && !mf.Required {
 			res.conflicts = append(res.conflicts, Conflict{
 				Source: spec.Source,
 				Field:  nf.Name,
 				Kind:   conflictRequiredAdded,
 				Detail: "optional field tightened to required",
 			})
+			continue
+		}
+		if nf.Description != "" && nf.Description != mf.Description {
+			described = append(described, nf.Name)
+			mf.Description = nf.Description
+		}
+		// Re-derive required across all current contributions: the
+		// merged field is required while ANY contributing source
+		// declares it required, and becomes optional the moment the
+		// last required attestation goes away (relaxation only;
+		// tightening is rejected above).
+		if mf.Required && !nf.Required && !fieldRequiredByOther(contribs, spec.Source, nf.Name) {
+			mf.Required = false
+			relaxed = append(relaxed, nf.Name)
+		}
+		mergedFieldList[idx] = mf
+	}
+	// A source may stop contributing a field (only allowed while
+	// others still contribute it): re-derive its required flag.
+	for name := range dropped {
+		if idx, ok := mergedByIndex[name]; ok {
+			mf := mergedFieldList[idx]
+			if mf.Required && !fieldRequiredByOther(contribs, spec.Source, name) {
+				mf.Required = false
+				relaxed = append(relaxed, name)
+				mergedFieldList[idx] = mf
+			}
 		}
 	}
 	if len(res.conflicts) > 0 {
@@ -193,6 +246,12 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 	if len(added) > 0 {
 		changedParts = append(changedParts, "fields added: "+joinSorted(added))
 	}
+	if len(described) > 0 {
+		changedParts = append(changedParts, "field descriptions updated: "+joinSorted(described))
+	}
+	if len(relaxed) > 0 {
+		changedParts = append(changedParts, "fields relaxed to optional: "+joinSorted(relaxed))
+	}
 	// Attribution changes even when the merged spec does not: a new
 	// source appears, or a source starts/stops contributing a field,
 	// owner or tag name.
@@ -227,6 +286,22 @@ func contributedByOther(contribs map[string]EntitySpec, src, name string) bool {
 		}
 		for _, f := range cs.Fields {
 			if f.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// fieldRequiredByOther reports whether any source other than src
+// still declares field name as required in its last accepted report.
+func fieldRequiredByOther(contribs map[string]EntitySpec, src, name string) bool {
+	for s, cs := range contribs {
+		if s == src {
+			continue
+		}
+		for _, f := range cs.Fields {
+			if f.Name == name && f.Required {
 				return true
 			}
 		}

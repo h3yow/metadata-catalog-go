@@ -33,17 +33,20 @@ func newStore() *store {
 }
 
 // entityID derives the stable identity of a logical entity from its
-// name alone, never from the reporting source: the same logical
-// entity reported by any number of sources maps to one record.
+// (trimmed) name AND kind together, never from the reporting source:
+// the same logical entity reported by any number of sources maps to
+// one record.
 //
-// The rule is deliberately conservative: reports with the same
-// (trimmed) name refer to the same logical entity only while their
-// kind agrees; a same-named report with a different kind is rejected
-// as a semantic_changed conflict instead of being silently merged or
-// silently split into a second record. Genuinely different entities
-// must therefore use distinct names (e.g. carry a domain prefix).
-func entityID(name string) string {
-	return strings.TrimSpace(name)
+// Same name + same kind => the same logical entity, merged across all
+// sources. Same name + different kind => two independent records (a
+// table "orders" and a topic "orders" coexist; their current state,
+// version history, report logs, search results and lineage never
+// touch each other). validateSpec guarantees kind contains neither
+// "." nor "/" and name contains no "/", so the "name.kind" encoding
+// is unambiguous (the kind is the part after the final dot) and stays
+// usable as an HTTP path segment.
+func entityID(name, kind string) string {
+	return strings.TrimSpace(name) + "." + strings.TrimSpace(kind)
 }
 
 func edgeKey(upstreamID, downstreamID string) string {

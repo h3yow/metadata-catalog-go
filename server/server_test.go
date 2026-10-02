@@ -86,10 +86,10 @@ func TestHTTPMultiSourceFlow(t *testing.T) {
 
 	// Current state: merged, attributed.
 	var e catalog.Entity
-	if getJSON(t, srv.URL+"/v1/entities/orders", &e) != http.StatusOK {
+	if getJSON(t, srv.URL+"/v1/entities/orders.table", &e) != http.StatusOK {
 		t.Fatal("GET entity failed")
 	}
-	t.Logf("input: GET /v1/entities/orders -> verdict: version=%d sources=%v fields=%d",
+	t.Logf("input: GET /v1/entities/orders.table -> verdict: version=%d sources=%v fields=%d",
 		e.Version, e.Sources, len(e.Fields))
 	if len(e.Sources) != 2 || len(e.Fields) != 3 {
 		t.Fatalf("merge over HTTP wrong: sources=%v fields=%+v", e.Sources, e.Fields)
@@ -120,14 +120,14 @@ func TestHTTPMultiSourceFlow(t *testing.T) {
 
 	// Version history.
 	var vs []catalog.EntityVersion
-	getJSON(t, srv.URL+"/v1/entities/orders/versions", &vs)
+	getJSON(t, srv.URL+"/v1/entities/orders.table/versions", &vs)
 	if len(vs) != 2 || vs[1].Source != "warehouse" {
 		t.Fatalf("versions wrong: %+v", vs)
 	}
 
 	// Per-source report log.
 	var reps []catalog.SourceReport
-	getJSON(t, srv.URL+"/v1/entities/orders/reports?source=warehouse", &reps)
+	getJSON(t, srv.URL+"/v1/entities/orders.table/reports?source=warehouse", &reps)
 	if len(reps) != 1 || reps[0].Source != "warehouse" || reps[0].ReportedAt.IsZero() {
 		t.Fatalf("reports log wrong: %+v", reps)
 	}
@@ -166,13 +166,13 @@ func TestHTTPSearchLineageImpact(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	if st := postEdge("raw_orders", "orders"); st != http.StatusCreated {
+	if st := postEdge("raw_orders.table", "orders.table"); st != http.StatusCreated {
 		t.Fatalf("edge 1: %d", st)
 	}
-	if st := postEdge("orders", "revenue"); st != http.StatusCreated {
+	if st := postEdge("orders.table", "revenue.table"); st != http.StatusCreated {
 		t.Fatalf("edge 2: %d", st)
 	}
-	if st := postEdge("orders", "revenue"); st != http.StatusConflict {
+	if st := postEdge("orders.table", "revenue.table"); st != http.StatusConflict {
 		t.Fatalf("duplicate edge: %d", st)
 	}
 
@@ -185,25 +185,25 @@ func TestHTTPSearchLineageImpact(t *testing.T) {
 	}
 	// Search by keyword.
 	getJSON(t, srv.URL+"/v1/entities?keyword=revenue", &hits)
-	if len(hits) != 1 || hits[0].ID != "revenue" {
+	if len(hits) != 1 || hits[0].ID != "revenue.table" {
 		t.Fatalf("keyword search: %+v", hits)
 	}
 
 	// Impact analysis, stable across repeated queries.
 	var first, again catalog.ImpactReport
-	getJSON(t, srv.URL+"/v1/entities/raw_orders/downstream", &first)
+	getJSON(t, srv.URL+"/v1/entities/raw_orders.table/downstream", &first)
 	t.Logf("input: GET downstream of raw_orders -> verdict: %v", first.EntityIDs)
 	if len(first.EntityIDs) != 2 {
 		t.Fatalf("downstream: %v", first.EntityIDs)
 	}
 	for i := 0; i < 20; i++ {
-		getJSON(t, srv.URL+"/v1/entities/raw_orders/downstream", &again)
+		getJSON(t, srv.URL+"/v1/entities/raw_orders.table/downstream", &again)
 		if fmt.Sprint(again.EntityIDs) != fmt.Sprint(first.EntityIDs) {
 			t.Fatalf("impact order unstable: %v vs %v", again.EntityIDs, first.EntityIDs)
 		}
 	}
 	var up catalog.ImpactReport
-	getJSON(t, srv.URL+"/v1/entities/revenue/upstream", &up)
+	getJSON(t, srv.URL+"/v1/entities/revenue.table/upstream", &up)
 	if len(up.EntityIDs) != 2 {
 		t.Fatalf("upstream: %v", up.EntityIDs)
 	}
@@ -232,7 +232,7 @@ func TestHTTPConcurrentSubmitNoLoss(t *testing.T) {
 				return
 			default:
 			}
-			resp, err := http.Get(srv.URL + "/v1/entities/events")
+			resp, err := http.Get(srv.URL + "/v1/entities/events.table")
 			if err != nil {
 				continue
 			}
@@ -281,7 +281,7 @@ func TestHTTPConcurrentSubmitNoLoss(t *testing.T) {
 	}
 
 	var e catalog.Entity
-	getJSON(t, srv.URL+"/v1/entities/events", &e)
+	getJSON(t, srv.URL+"/v1/entities/events.table", &e)
 	t.Logf("input: %d concurrent HTTP reports -> verdict: version=%d fields=%d sources=%d",
 		n, e.Version, len(e.Fields), len(e.Sources))
 	if e.Version != n || len(e.Fields) != n || len(e.Sources) != n {

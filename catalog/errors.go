@@ -35,7 +35,7 @@ type Conflict struct {
 	// Source is the reporting source responsible for the conflict.
 	Source string `json:"source,omitempty"`
 	Field  string `json:"field"`
-	Kind   string `json:"kind"` // "field_removed", "type_changed", "required_added", "semantic_changed"
+	Kind   string `json:"kind"` // "field_removed", "type_changed", "required_added"; "semantic_changed" is emitted only by the fixed-entity evolution helper diffSpecs (catalog identity is name+kind, so differing kinds never reach mergeReport for one record)
 	Detail string `json:"detail"`
 }
 
