@@ -21,36 +21,39 @@
 | `LineageEdge` | 一条有向血缘边：`UpstreamID -> DownstreamID`（生产者 -> 消费者）+ `Relation` |
 | `ImpactReport` | 影响分析结果：起点、方向、去重且有序的实体列表、实际经过的边 |
 
-## 2. 多来源归属规则（身份判定）
+## 2. 实体身份与归属规则
 
-**实体 ID 只由实体名称决定：`ID = trim(Name)`，与上报来源无关。**
+**实体身份由 (Kind, Name) 二元组决定，与上报来源无关：`ID = "kind:name"`**
+（Kind 为空时 ID 就是名称本身）。
 
-- 任意多个来源上报**同名**实体 → 同一条实体记录，各自的内容按第 3 节规则合并；
-- 同名但 **Kind 不一致** → 视为归属冲突，整条上报被拒绝
-  （`incompatible_change` / `semantic_changed`，冲突里标注来源），
-  **既不强行合并，也不静默拆成两条**；
-- 因此真正不同的实体必须使用不同名称（建议带域前缀，如 `risk.orders` / `ads.orders`）；
-- 名称不允许为空、不允许含 `/`（保证 HTTP 路径可用）。
+- 任意多个来源上报**同名同 Kind** 的实体 → 同一条实体记录，各自的内容按
+  第 3 节规则合并，**不会被拆开**；
+- **同名但不同 Kind**（例如表 `orders` 与消息主题 `orders`）→
+  **各自独立的实体记录**：独立的 ID、版本历史、上报日志与血缘，
+  查询、检索、影响分析互不影响，后一个上报不会被拒绝；
+- 名称不允许为空、不允许含 `/` 或 `:`；Kind 不允许含 `:`
+  （保证 ID 无歧义且能直接用作 HTTP 路径段）。
 
-这套规则是保守且可解释的：同名同 Kind 才合并；任何不一致都变成
+这套规则是可解释的：是否同一条记录只看 (Kind, Name)，归属从不依赖
+"谁先报、谁后报"；真正不兼容的内容差异（见下节）仍然变成
 **可定位到具体来源的拒绝**，交给对应团队对齐，而不是目录擅自猜测。
 
 ## 3. 多来源合并与冲突判定
 
 `Register(spec)`（以及带乐观锁的 `RegisterAt(spec, expectedVersion)`）的判定顺序：
 
-1. **结构校验**：名称/来源非空、名称不含 `/`、字段不重名、类型合法、
-   `RemovedFields` 不与 `Fields` 重叠，否则 `invalid_spec`（不接触任何状态）。
+1. **结构校验**：名称/来源非空、名称不含 `/` 与 `:`、Kind 不含 `:`、
+   字段不重名、类型合法、`RemovedFields` 不与 `Fields` 重叠，
+   否则 `invalid_spec`（不接触任何状态）。
 2. **同源重复上报**：与**该来源自己上一次被接受的上报**语义一致
    （字段/Owner/标签顺序无关）→ `duplicate_report`，
    **不新增版本、不改写历史、不刷新时间戳、不在上报日志里堆积**。
-3. **冲突检测**：存在任一冲突则**整体拒绝**（该来源本次任何内容都不生效），
-   返回 `incompatible_change` 且携带 `Conflicts[]`，每条冲突都标注
-   **来源 Source、字段 Field、类别 Kind**：
+3. **冲突检测**：存在任一冲突则**整体拒绝**（该来源本次任何内容都不生效，
+   当前状态、历史、日志、时间戳都不留痕迹），返回 `incompatible_change`
+   且携带 `Conflicts[]`，每条冲突都标注**来源 Source、字段 Field、类别 Kind**：
 
    | 冲突 kind | 触发条件 |
    | --- | --- |
-   | `semantic_changed` | 上报的 Kind 与实体现有 Kind 不一致 |
    | `type_changed` | 某来源上报的字段类型与合并状态中的类型不一致 |
    | `required_added` | 新增必填字段，或把合并状态中的可选字段收紧为必填 |
    | `field_removed` | 显式删除：`RemovedFields` 非空（一律拒绝，删除需多方协调）；或隐式删除：某来源丢弃了**只有它自己贡献**的字段 |
@@ -61,9 +64,13 @@
    字段保留、归属表更新。
 4. **合并（不是覆盖）**：冲突为空即接受：
    - 字段取**并集**（新增可选字段放行），同名字段类型已在第 3 步保证一致；
+   - **同名字段的兼容更新会真正落到合并状态**：字段说明取最近一次
+     非空上报（latest non-empty wins）；必填放宽为可选在所有贡献者
+     都不再要求必填时生效（只要还有一个来源声明必填，合并状态就保持必填）；
    - `Owners` / `Tags` 跨来源取**并集并去重**（排序存储，结果确定）；
-   - `Description` 取最近一次非空上报；
-   - 合并状态或来源归属有变化 → 提交新版本（version + 1）并写入不可变历史；
+   - 实体 `Description` 取最近一次非空上报；
+   - 合并状态或来源归属有变化 → 提交新版本（version + 1）并写入不可变历史，
+     版本原因会注明 `fields added: ...` / `fields updated: ...` 等；
      仅来源贡献记录变化而合并状态不变 → 只记录贡献与上报日志，不增版本。
 
 每次接受的上报都追加到**按来源可查的上报日志**（`Reports(id, source)`）：
@@ -138,10 +145,10 @@ curl -X POST localhost:8080/v1/reports -d '{
   "owners":["bob"],"tags":["curated"],
   "fields":[{"name":"note","type":"string"}]}'
 
-curl localhost:8080/v1/entities/orders            # 合并状态 + 来源归属
-curl localhost:8080/v1/entities/orders/versions   # 版本历史
-curl 'localhost:8080/v1/entities/orders/reports?source=bizdb'  # bizdb 上报日志
-curl 'localhost:8080/v1/entities?tag=core'        # 检索
+curl localhost:8080/v1/entities/table:orders            # 合并状态 + 来源归属
+curl localhost:8080/v1/entities/table:orders/versions   # 版本历史
+curl 'localhost:8080/v1/entities/table:orders/reports?source=bizdb'  # bizdb 上报日志
+curl 'localhost:8080/v1/entities?tag=core'              # 检索
 ```
 
 错误统一返回 JSON：`{"reason": "...", "message": "...", "conflicts": [...]}`，
@@ -156,26 +163,78 @@ version_conflict / duplicate_edge）。`conflicts` 中含来源、字段、类�
 ## 7. 验证方法
 
 ```bash
-# 全部单元测试（多来源合并/冲突、重复上报、不兼容演进、环状与多路径血缘、并发）
+# 全部单元测试（多来源合并/冲突、重复上报、兼容更新、同名不同 Kind 共存、
+# 不兼容演进、环状与多路径血缘、并发）
 go test ./... -race -count=1 -v
 
-# 端到端演示（多来源合并、归属、冲突、血缘、CAS）
+# 端到端演示（多来源合并、归属、冲突、兼容字段更新、同名不同 Kind、血缘、CAS）
 go run ./cmd/demo
 
 # 本地 HTTP 入口
 go run ./cmd/catalogd -addr 127.0.0.1:8080   # 然后用上面 curl 示例验证
 ```
 
+### 场景一：同源字段兼容更新
+
+```bash
+# 1) bizdb 首次上报：id 必填、amount 带旧说明
+curl -X POST localhost:8080/v1/reports -d '{
+  "name":"orders","source":"bizdb","kind":"table",
+  "fields":[{"name":"id","type":"int","required":true},
+            {"name":"amount","type":"float","description":"old"}]}'
+
+# 2) 同一来源做兼容调整：id 放宽为可选、amount 说明改为新值
+curl -X POST localhost:8080/v1/reports -d '{
+  "name":"orders","source":"bizdb","kind":"table",
+  "fields":[{"name":"id","type":"int"},
+            {"name":"amount","type":"float","description":"new"}]}'
+
+# 3) 三处互相印证：当前状态已是新说明+可选、版本历史多了一条
+#    "fields updated: ..."、上报日志里两条记录分别指向 v1/v2
+curl localhost:8080/v1/entities/table:orders
+curl localhost:8080/v1/entities/table:orders/versions
+curl 'localhost:8080/v1/entities/table:orders/reports?source=bizdb'
+```
+
+对应单测：`TestSameSourceCompatibleFieldUpdate`、
+`TestRequiredRelaxationRespectsOtherSources`、
+`TestStateHistoryReportsConsistency`（HTTP 侧
+`TestHTTPSameNameDifferentKindCoexist` 也覆盖了一次兼容更新）。
+
+### 场景二：同名不同 Kind 实体共存
+
+```bash
+# 表 orders 与主题 orders 各自成为独立记录
+curl -X POST localhost:8080/v1/reports -d '{
+  "name":"orders","source":"bizdb","kind":"table",
+  "fields":[{"name":"id","type":"int"}]}'
+curl -X POST localhost:8080/v1/reports -d '{
+  "name":"orders","source":"kafka","kind":"topic",
+  "fields":[{"name":"key","type":"string"}]}'
+
+curl localhost:8080/v1/entities/table:orders   # 表：自己的版本与字段
+curl localhost:8080/v1/entities/topic:orders   # 主题：互不影响
+curl 'localhost:8080/v1/entities?keyword=orders'   # 检索能同时看到两条独立记录
+```
+
+对应单测：`TestSameNameDifferentKindAreDistinctEntities`、
+`TestSameNameDifferentKindSearchAndLineage`、
+`TestHTTPSameNameDifferentKindCoexist`。
+
 测试设计要点：
 
 - 失败一律断言具体 `Reason`，合并/演进失败进一步断言具体
   `Conflict{Source, Field, Kind}`；
 - 多来源用例覆盖：并集合并与归属表、同源重复上报不堆积不刷新时间、
-  跨来源类型/必填/Kind 冲突整体拒绝、显式删除拒绝、
+  跨来源类型/必填冲突整体拒绝且不留痕迹、显式删除拒绝、
   "没提到不等于删除"、后报不覆盖先报、并发多来源提交不丢数据；
+- 兼容更新用例覆盖：同源字段说明更新与必填放宽落到当前状态并产生版本、
+  必填放宽被其他仍要求必填的来源阻止、更新后当前状态/版本历史/上报日志三者一致；
+- 同名不同 Kind 用例覆盖：各自独立成记录、独立演进与历史、检索与血缘隔离，
+  同名同 Kind 仍然合并不拆分；
 - HTTP 用例覆盖：端到端合并流程、错误状态码与冲突体映射、
-  20 个来源并发经 HTTP 提交 + 并发读，校验每次读到的状态自洽
-  （字段数 == 版本数）且最终无丢失；
+  同名不同 Kind 共存与兼容更新、20 个来源并发经 HTTP 提交 + 并发读，
+  校验每次读到的状态自洽（字段数 == 版本数）且最终无丢失；
 - 血缘测试构造菱形 + 回环图，断言去重、防环、边不重复以及 50 次重复运行顺序一致；
 - 每个用例通过 `t.Logf` 打印**输入**与**最终判定依据**，用 `-v` 可直接查看。
 

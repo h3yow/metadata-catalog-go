@@ -21,21 +21,23 @@ func New() *Catalog {
 }
 
 // Register folds a source's report into the logical entity identified
-// by the report's name. Reports from any number of sources about the
-// same logical entity merge into one record; the merged state is a
-// union, never a last-writer overwrite.
+// by the report's (kind, name) pair. Reports from any number of
+// sources about the same logical entity merge into one record; the
+// merged state is a union, never a last-writer overwrite. The same
+// name under a different kind is a different entity with its own
+// independent record.
 //
 //   - A report identical to this source's own last accepted report is
 //     rejected with ReasonDuplicateReport; nothing is written, history
 //     and timestamps are untouched and no source information piles up.
-//   - A report that conflicts with the merged state (kind mismatch,
-//     field type disagreement, required tightening, explicit or
-//     implicit field removal) is rejected with
-//     ReasonIncompatibleChange and Conflicts attributing each
-//     conflict to a source and a field.
+//   - A report that conflicts with the merged state (field type
+//     disagreement, required tightening, explicit or implicit field
+//     removal) is rejected with ReasonIncompatibleChange and Conflicts
+//     attributing each conflict to a source and a field.
 //   - Otherwise the report is merged: fields union with type
-//     agreement, owners/tags union and de-duplicate, and a new
-//     version is committed when the merged state changed.
+//     agreement, compatible field updates (new description, required
+//     relaxation) are applied, owners/tags union and de-duplicate, and
+//     a new version is committed when the merged state changed.
 func (c *Catalog) Register(spec EntitySpec) (*Entity, error) {
 	return c.RegisterAt(spec, -1)
 }
@@ -60,7 +62,7 @@ func (c *Catalog) RegisterAt(spec EntitySpec, expectedVersion int) (*Entity, err
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	id := entityID(spec.Name)
+	id := entityID(spec.Kind, spec.Name)
 	now := time.Now().UTC()
 
 	rec, exists := c.st.get(id)

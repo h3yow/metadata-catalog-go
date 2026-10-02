@@ -33,17 +33,24 @@ func newStore() *store {
 }
 
 // entityID derives the stable identity of a logical entity from its
-// name alone, never from the reporting source: the same logical
-// entity reported by any number of sources maps to one record.
+// kind and name, never from the reporting source.
 //
-// The rule is deliberately conservative: reports with the same
-// (trimmed) name refer to the same logical entity only while their
-// kind agrees; a same-named report with a different kind is rejected
-// as a semantic_changed conflict instead of being silently merged or
-// silently split into a second record. Genuinely different entities
-// must therefore use distinct names (e.g. carry a domain prefix).
-func entityID(name string) string {
-	return strings.TrimSpace(name)
+// Reports with the same (trimmed) kind AND (trimmed) name refer to
+// the same logical entity and merge into one record, no matter how
+// many sources report it. The same name under a different kind is a
+// DIFFERENT entity (a table "orders" and a topic "orders" coexist as
+// independent records with independent history, reports and lineage).
+//
+// The ID is "kind:name" (or just the name when kind is empty). This
+// is unambiguous because neither kind nor name may contain ':' and
+// the name may not contain '/' (see validateSpec).
+func entityID(kind, name string) string {
+	k := strings.TrimSpace(kind)
+	n := strings.TrimSpace(name)
+	if k == "" {
+		return n
+	}
+	return k + ":" + n
 }
 
 func edgeKey(upstreamID, downstreamID string) string {

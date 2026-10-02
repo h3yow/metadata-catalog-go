@@ -37,8 +37,15 @@ type mergeResult struct {
 //     field_removed; explicit RemovedFields entries are always
 //     rejected as field_removed as well.
 //   - All contributors of a field must agree on its type; a required
-//     tightening is rejected; kind must match the entity's kind.
+//     tightening is rejected. Compatible field updates ARE applied to
+//     the merged state: a non-empty description replaces the merged
+//     description (latest non-empty wins) and a required field is
+//     relaxed to optional once no contributor still requires it.
 //   - Owners and tags are unioned and de-duplicated across sources.
+//
+// The entity kind is not compared here: kind is part of the entity
+// identity (see entityID), so reports reaching one record always
+// share its kind.
 func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec EntitySpec) mergeResult {
 	res := mergeResult{}
 
@@ -49,18 +56,7 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 		return res
 	}
 
-	// 2. Entity identity attributes must agree across sources.
-	if currentMerged.Kind != spec.Kind {
-		res.conflicts = append(res.conflicts, Conflict{
-			Source: spec.Source,
-			Field:  "kind",
-			Kind:   conflictSemanticChanged,
-			Detail: "kind is " + currentMerged.Kind + " but source " + spec.Source +
-				" reports " + spec.Kind,
-		})
-	}
-
-	// 3. Explicit removal requests are always rejected: deletion is a
+	// 2. Explicit removal requests are always rejected: deletion is a
 	//    breaking change no single source may perform unilaterally.
 	mergedFields := map[string]FieldSpec{}
 	for _, f := range currentMerged.Fields {
@@ -79,7 +75,7 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 		})
 	}
 
-	// 4. Implicit removal: the source drops a field it contributed
+	// 3. Implicit removal: the source drops a field it contributed
 	//    before and no other source contributes it. (Another source
 	//    not mentioning the field is never a removal.)
 	if reportedBefore {
@@ -103,9 +99,15 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 		}
 	}
 
-	// 5. Fold incoming fields into the merged field set.
+	// 4. Fold incoming fields into the merged field set. Compatible
+	//    updates to existing fields (new description, required
+	//    relaxation) are applied to the merged state, not dropped.
 	mergedFieldList := cloneFields(currentMerged.Fields)
-	var added []string
+	fieldIndex := make(map[string]int, len(mergedFieldList))
+	for i, f := range mergedFieldList {
+		fieldIndex[f.Name] = i
+	}
+	var added, updated []string
 	for _, nf := range spec.Fields {
 		mf, ok := mergedFields[nf.Name]
 		switch {
@@ -137,13 +139,30 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 				Kind:   conflictRequiredAdded,
 				Detail: "optional field tightened to required",
 			})
+		default:
+			// Compatible update of an existing field: latest non-empty
+			// description wins; required relaxes to optional once no
+			// OTHER contributor still declares it required.
+			up := mf
+			if nf.Description != "" {
+				up.Description = nf.Description
+			}
+			if up.Required && !nf.Required &&
+				!requiredByOther(contribs, spec.Source, nf.Name) {
+				up.Required = false
+			}
+			if up != mf {
+				updated = append(updated, nf.Name)
+				mergedFields[nf.Name] = up
+				mergedFieldList[fieldIndex[nf.Name]] = up
+			}
 		}
 	}
 	if len(res.conflicts) > 0 {
 		return res
 	}
 
-	// 6. Union owners/tags across all contributions (incoming
+	// 5. Union owners/tags across all contributions (incoming
 	//    replaces this source's previous report).
 	owners, tags := map[string]struct{}{}, map[string]struct{}{}
 	for src, cs := range contribs {
@@ -179,7 +198,7 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 	merged.Tags = sortedKeys(tags)
 	res.merged = merged
 
-	// 7. Change classification (merged spec vs. previous merged spec).
+	// 6. Change classification (merged spec vs. previous merged spec).
 	var changedParts []string
 	if merged.Description != currentMerged.Description {
 		changedParts = append(changedParts, "description")
@@ -192,6 +211,9 @@ func mergeReport(currentMerged EntitySpec, contribs map[string]EntitySpec, spec 
 	}
 	if len(added) > 0 {
 		changedParts = append(changedParts, "fields added: "+joinSorted(added))
+	}
+	if len(updated) > 0 {
+		changedParts = append(changedParts, "fields updated: "+joinSorted(updated))
 	}
 	// Attribution changes even when the merged spec does not: a new
 	// source appears, or a source starts/stops contributing a field,
@@ -227,6 +249,23 @@ func contributedByOther(contribs map[string]EntitySpec, src, name string) bool {
 		}
 		for _, f := range cs.Fields {
 			if f.Name == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// requiredByOther reports whether any source other than src currently
+// declares field name as required. It gates required relaxation: the
+// merged state stays required while any contributor still requires it.
+func requiredByOther(contribs map[string]EntitySpec, src, name string) bool {
+	for s, cs := range contribs {
+		if s == src {
+			continue
+		}
+		for _, f := range cs.Fields {
+			if f.Name == name && f.Required {
 				return true
 			}
 		}

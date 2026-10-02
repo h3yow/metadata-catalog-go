@@ -24,6 +24,12 @@ func validateSpec(spec EntitySpec) error {
 	if strings.Contains(spec.Name, "/") {
 		return errf(ReasonInvalidSpec, "entity name %q must not contain '/'", spec.Name)
 	}
+	if strings.Contains(spec.Name, ":") {
+		return errf(ReasonInvalidSpec, "entity name %q must not contain ':'", spec.Name)
+	}
+	if strings.Contains(spec.Kind, ":") {
+		return errf(ReasonInvalidSpec, "entity kind %q must not contain ':'", spec.Kind)
+	}
 	if strings.TrimSpace(spec.Source) == "" {
 		return errf(ReasonInvalidSpec, "entity source must not be empty")
 	}
@@ -54,10 +60,9 @@ func validateSpec(spec EntitySpec) error {
 
 // conflict kinds emitted by mergeReport and diffSpecs.
 const (
-	conflictFieldRemoved    = "field_removed"
-	conflictTypeChanged     = "type_changed"
-	conflictRequiredAdded   = "required_added"
-	conflictSemanticChanged = "semantic_changed"
+	conflictFieldRemoved  = "field_removed"
+	conflictTypeChanged   = "type_changed"
+	conflictRequiredAdded = "required_added"
 )
 
 // evolutionResult classifies a new report relative to the stored spec.
@@ -86,8 +91,14 @@ type evolutionResult struct {
 //   - adding a required field, or tightening an optional field to
 //     required, is incompatible (required_added), because existing
 //     producers/consumers cannot satisfy it;
-//   - changing the entity kind is incompatible (semantic_changed);
-//   - description / owners / tags changes are always compatible.
+//   - relaxing a required field to optional is compatible, as is
+//     updating a field's description;
+//   - entity / field description and owners / tags changes are always
+//     compatible.
+//
+// The entity kind is never compared here: kind is part of the entity
+// identity, so two specs with different kinds belong to different
+// entities and never meet in one merge.
 //
 // Ordering inside fields, owners and tags is insignificant.
 func diffSpecs(old, new EntitySpec) evolutionResult {

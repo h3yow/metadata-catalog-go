@@ -81,18 +81,6 @@ func TestDiffSpecsOptionalTightenedToRequired(t *testing.T) {
 	assertConflict(t, res, "amount", conflictRequiredAdded)
 }
 
-func TestDiffSpecsKindChanged(t *testing.T) {
-	old := baseSpec()
-	new := baseSpec()
-	new.Kind = "view"
-
-	res := diffSpecs(old, new)
-	t.Logf("input: kind %s -> %s", old.Kind, new.Kind)
-	t.Logf("verdict: conflicts=%+v", res.conflicts)
-
-	assertConflict(t, res, "kind", conflictSemanticChanged)
-}
-
 func TestDiffSpecsDuplicateIgnoresOrder(t *testing.T) {
 	old := baseSpec()
 	new := baseSpec()

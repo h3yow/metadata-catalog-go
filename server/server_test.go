@@ -86,10 +86,10 @@ func TestHTTPMultiSourceFlow(t *testing.T) {
 
 	// Current state: merged, attributed.
 	var e catalog.Entity
-	if getJSON(t, srv.URL+"/v1/entities/orders", &e) != http.StatusOK {
+	if getJSON(t, srv.URL+"/v1/entities/table:orders", &e) != http.StatusOK {
 		t.Fatal("GET entity failed")
 	}
-	t.Logf("input: GET /v1/entities/orders -> verdict: version=%d sources=%v fields=%d",
+	t.Logf("input: GET /v1/entities/table:orders -> verdict: version=%d sources=%v fields=%d",
 		e.Version, e.Sources, len(e.Fields))
 	if len(e.Sources) != 2 || len(e.Fields) != 3 {
 		t.Fatalf("merge over HTTP wrong: sources=%v fields=%+v", e.Sources, e.Fields)
@@ -120,14 +120,14 @@ func TestHTTPMultiSourceFlow(t *testing.T) {
 
 	// Version history.
 	var vs []catalog.EntityVersion
-	getJSON(t, srv.URL+"/v1/entities/orders/versions", &vs)
+	getJSON(t, srv.URL+"/v1/entities/table:orders/versions", &vs)
 	if len(vs) != 2 || vs[1].Source != "warehouse" {
 		t.Fatalf("versions wrong: %+v", vs)
 	}
 
 	// Per-source report log.
 	var reps []catalog.SourceReport
-	getJSON(t, srv.URL+"/v1/entities/orders/reports?source=warehouse", &reps)
+	getJSON(t, srv.URL+"/v1/entities/table:orders/reports?source=warehouse", &reps)
 	if len(reps) != 1 || reps[0].Source != "warehouse" || reps[0].ReportedAt.IsZero() {
 		t.Fatalf("reports log wrong: %+v", reps)
 	}
@@ -166,13 +166,13 @@ func TestHTTPSearchLineageImpact(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	if st := postEdge("raw_orders", "orders"); st != http.StatusCreated {
+	if st := postEdge("table:raw_orders", "table:orders"); st != http.StatusCreated {
 		t.Fatalf("edge 1: %d", st)
 	}
-	if st := postEdge("orders", "revenue"); st != http.StatusCreated {
+	if st := postEdge("table:orders", "table:revenue"); st != http.StatusCreated {
 		t.Fatalf("edge 2: %d", st)
 	}
-	if st := postEdge("orders", "revenue"); st != http.StatusConflict {
+	if st := postEdge("table:orders", "table:revenue"); st != http.StatusConflict {
 		t.Fatalf("duplicate edge: %d", st)
 	}
 
@@ -185,25 +185,25 @@ func TestHTTPSearchLineageImpact(t *testing.T) {
 	}
 	// Search by keyword.
 	getJSON(t, srv.URL+"/v1/entities?keyword=revenue", &hits)
-	if len(hits) != 1 || hits[0].ID != "revenue" {
+	if len(hits) != 1 || hits[0].ID != "table:revenue" {
 		t.Fatalf("keyword search: %+v", hits)
 	}
 
 	// Impact analysis, stable across repeated queries.
 	var first, again catalog.ImpactReport
-	getJSON(t, srv.URL+"/v1/entities/raw_orders/downstream", &first)
+	getJSON(t, srv.URL+"/v1/entities/table:raw_orders/downstream", &first)
 	t.Logf("input: GET downstream of raw_orders -> verdict: %v", first.EntityIDs)
 	if len(first.EntityIDs) != 2 {
 		t.Fatalf("downstream: %v", first.EntityIDs)
 	}
 	for i := 0; i < 20; i++ {
-		getJSON(t, srv.URL+"/v1/entities/raw_orders/downstream", &again)
+		getJSON(t, srv.URL+"/v1/entities/table:raw_orders/downstream", &again)
 		if fmt.Sprint(again.EntityIDs) != fmt.Sprint(first.EntityIDs) {
 			t.Fatalf("impact order unstable: %v vs %v", again.EntityIDs, first.EntityIDs)
 		}
 	}
 	var up catalog.ImpactReport
-	getJSON(t, srv.URL+"/v1/entities/revenue/upstream", &up)
+	getJSON(t, srv.URL+"/v1/entities/table:revenue/upstream", &up)
 	if len(up.EntityIDs) != 2 {
 		t.Fatalf("upstream: %v", up.EntityIDs)
 	}
@@ -232,7 +232,7 @@ func TestHTTPConcurrentSubmitNoLoss(t *testing.T) {
 				return
 			default:
 			}
-			resp, err := http.Get(srv.URL + "/v1/entities/events")
+			resp, err := http.Get(srv.URL + "/v1/entities/table:events")
 			if err != nil {
 				continue
 			}
@@ -281,11 +281,67 @@ func TestHTTPConcurrentSubmitNoLoss(t *testing.T) {
 	}
 
 	var e catalog.Entity
-	getJSON(t, srv.URL+"/v1/entities/events", &e)
+	getJSON(t, srv.URL+"/v1/entities/table:events", &e)
 	t.Logf("input: %d concurrent HTTP reports -> verdict: version=%d fields=%d sources=%d",
 		n, e.Version, len(e.Fields), len(e.Sources))
 	if e.Version != n || len(e.Fields) != n || len(e.Sources) != n {
 		t.Fatalf("lost update over HTTP: version=%d fields=%d sources=%d",
 			e.Version, len(e.Fields), len(e.Sources))
+	}
+}
+
+// TestHTTPSameNameDifferentKindCoexist: over HTTP, a table and a topic
+// both named "orders" are accepted as independent entities; the
+// kind-qualified IDs work as URL path segments and each entity keeps
+// its own state, history and report log.
+func TestHTTPSameNameDifferentKindCoexist(t *testing.T) {
+	srv, _ := newTestServer(t)
+
+	table := specOf("bizdb", catalog.FieldSpec{Name: "id", Type: catalog.TypeInt, Required: true})
+	if st, body := postReport(t, srv, table); st != http.StatusOK {
+		t.Fatalf("table report: %d %v", st, body)
+	}
+	topic := catalog.EntitySpec{
+		Name: "orders", Source: "kafka", Kind: "topic",
+		Fields: []catalog.FieldSpec{{Name: "key", Type: catalog.TypeString}},
+	}
+	st, body := postReport(t, srv, topic)
+	t.Logf("input: topic orders after table orders -> verdict: status=%d id=%v", st, body["id"])
+	if st != http.StatusOK || body["id"] != "topic:orders" {
+		t.Fatalf("topic must be accepted as its own entity: %d %v", st, body)
+	}
+
+	// Compatible same-source field update over HTTP: new description
+	// and required relaxation must move the merged state and version.
+	upd := catalog.EntitySpec{
+		Name: "orders", Source: "bizdb", Kind: "table",
+		Fields: []catalog.FieldSpec{
+			{Name: "id", Type: catalog.TypeInt, Description: "primary key"}, // relaxed + documented
+		},
+	}
+	st, body = postReport(t, srv, upd)
+	t.Logf("input: bizdb relaxes+documents id -> verdict: status=%d version=%v", st, body["version"])
+	if st != http.StatusOK || body["version"] != float64(2) {
+		t.Fatalf("compatible update over HTTP: %d %v", st, body)
+	}
+
+	// The two entities are independent: table at v2, topic at v1.
+	var te, ke catalog.Entity
+	if getJSON(t, srv.URL+"/v1/entities/table:orders", &te) != http.StatusOK {
+		t.Fatal("GET table:orders failed")
+	}
+	if getJSON(t, srv.URL+"/v1/entities/topic:orders", &ke) != http.StatusOK {
+		t.Fatal("GET topic:orders failed")
+	}
+	t.Logf("verdict: table version=%d fields=%d, topic version=%d fields=%d",
+		te.Version, len(te.Fields), ke.Version, len(ke.Fields))
+	if te.Version != 2 || ke.Version != 1 || len(ke.Fields) != 1 || ke.Fields[0].Name != "key" {
+		t.Fatalf("entities not independent: table=%+v topic=%+v", te, ke)
+	}
+	var th, kh []catalog.EntityVersion
+	getJSON(t, srv.URL+"/v1/entities/table:orders/versions", &th)
+	getJSON(t, srv.URL+"/v1/entities/topic:orders/versions", &kh)
+	if len(th) != 2 || len(kh) != 1 {
+		t.Fatalf("histories not independent: table=%d topic=%d", len(th), len(kh))
 	}
 }

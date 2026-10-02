@@ -31,7 +31,9 @@ type FieldSpec struct {
 // EntitySpec is the specification of an entity as reported by one
 // producer (a source at a point in time). A report only needs to
 // carry the part of the entity the source cares about; reports from
-// all sources are merged into a single logical entity.
+// all sources sharing the same (Kind, Name) pair are merged into a
+// single logical entity, while the same name under a different kind
+// is a separate, independent entity.
 type EntitySpec struct {
 	Name        string      `json:"name"`
 	Source      string      `json:"source"`
@@ -69,9 +71,9 @@ type Entity struct {
 	OwnerSources map[string][]string `json:"owner_sources,omitempty"`
 	// TagSources maps tag -> sources that listed it (sorted).
 	TagSources map[string][]string `json:"tag_sources,omitempty"`
-	Version     int         `json:"version"`
-	CreatedAt   time.Time   `json:"created_at"`
-	UpdatedAt   time.Time   `json:"updated_at"`
+	Version    int                 `json:"version"`
+	CreatedAt  time.Time           `json:"created_at"`
+	UpdatedAt  time.Time           `json:"updated_at"`
 }
 
 // EntityVersion is one immutable point in the version history of an

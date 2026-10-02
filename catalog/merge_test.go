@@ -201,7 +201,7 @@ func TestMultiSourceTypeConflict(t *testing.T) {
 		t.Fatalf("conflict not attributed to a source: %+v", ce.Conflicts)
 	}
 	// Rejection must be total: warehouse did not become a contributor.
-	got := mustGet(t, c, "orders")
+	got := mustGet(t, c, "table:orders")
 	if len(got.Sources) != 1 || got.Sources[0] != "bizdb" {
 		t.Fatalf("rejected report still contributed: %v", got.Sources)
 	}
@@ -228,7 +228,7 @@ func TestMultiSourceExplicitRemovalRejected(t *testing.T) {
 	if ce.Conflicts[0].Source != "warehouse" {
 		t.Fatalf("removal conflict not attributed: %+v", ce.Conflicts[0])
 	}
-	got := mustGet(t, c, "orders")
+	got := mustGet(t, c, "table:orders")
 	if len(got.Fields) != 2 {
 		t.Fatalf("explicit removal took effect: %+v", got.Fields)
 	}
@@ -271,19 +271,55 @@ func TestMultiSourceImplicitRemovalRejected(t *testing.T) {
 	}
 }
 
-func TestMultiSourceKindConflict(t *testing.T) {
+// TestSameNameDifferentKindAreDistinctEntities: a table named orders
+// and a topic named orders are different logical entities. The second
+// report must NOT be rejected and must NOT merge into the first: each
+// gets its own ID, version history and report log.
+func TestSameNameDifferentKindAreDistinctEntities(t *testing.T) {
 	c := New()
-	mustRegister(t, c, twoSourceReport("bizdb", FieldSpec{Name: "id", Type: TypeInt}))
+	table := mustRegister(t, c, twoSourceReport("bizdb", FieldSpec{Name: "id", Type: TypeInt}))
 
-	spec := twoSourceReport("kafka", FieldSpec{Name: "id", Type: TypeInt})
-	spec.Kind = "topic"
-	_, err := c.Register(spec)
-	ce, _ := AsCatalogError(err)
-	t.Logf("input: same name, kind topic vs table -> verdict: %v", reasonOf(err))
-	if reasonOf(err) != ReasonIncompatibleChange {
-		t.Fatalf("expected incompatible_change, got %v", err)
+	topicSpec := twoSourceReport("kafka", FieldSpec{Name: "id", Type: TypeInt})
+	topicSpec.Kind = "topic"
+	topic, err := c.Register(topicSpec)
+	t.Logf("input: table orders + topic orders -> verdict: table id=%s, topic id=%s, err=%v",
+		table.ID, topic.ID, err)
+	if err != nil {
+		t.Fatalf("same name with different kind must be accepted as its own entity: %v", err)
 	}
-	assertConflictErr(t, ce, "kind", conflictSemanticChanged)
+	if table.ID == topic.ID {
+		t.Fatalf("different kinds collapsed into one entity %s", table.ID)
+	}
+
+	// Each side evolves independently: versions and history do not
+	// leak across the two records.
+	topicV2Spec := twoSourceReport("kafka",
+		FieldSpec{Name: "id", Type: TypeInt},
+		FieldSpec{Name: "key", Type: TypeString},
+	)
+	topicV2Spec.Kind = "topic"
+	topicV2 := mustRegister(t, c, topicV2Spec)
+	if topicV2.ID != topic.ID || topicV2.Version != 2 {
+		t.Fatalf("topic did not evolve independently: id=%s version=%d", topicV2.ID, topicV2.Version)
+	}
+	tableNow := mustGet(t, c, table.ID)
+	if tableNow.Version != 1 || len(tableNow.Fields) != 1 {
+		t.Fatalf("topic report leaked into the table entity: %+v", tableNow)
+	}
+	tableHist, _ := c.History(table.ID)
+	topicHist, _ := c.History(topic.ID)
+	if len(tableHist) != 1 || len(topicHist) != 2 {
+		t.Fatalf("histories not independent: table=%d topic=%d", len(tableHist), len(topicHist))
+	}
+
+	// Same name AND same kind still merges into one record.
+	other := twoSourceReport("warehouse", FieldSpec{Name: "note", Type: TypeString})
+	merged := mustRegister(t, c, other)
+	t.Logf("input: warehouse reports table orders -> verdict: merged into %s version=%d",
+		merged.ID, merged.Version)
+	if merged.ID != table.ID {
+		t.Fatalf("same name+kind split into %s, expected %s", merged.ID, table.ID)
+	}
 }
 
 func TestMultiSourceRequiredTightening(t *testing.T) {
@@ -310,7 +346,7 @@ func TestReportsLogPerSource(t *testing.T) {
 	)
 	mustRegister(t, c, v2)
 
-	all, err := c.Reports("orders", "")
+	all, err := c.Reports("table:orders", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,14 +362,14 @@ func TestReportsLogPerSource(t *testing.T) {
 			t.Fatal("report missing version")
 		}
 	}
-	biz, _ := c.Reports("orders", "bizdb")
+	biz, _ := c.Reports("table:orders", "bizdb")
 	if len(biz) != 2 || biz[1].Version != 3 {
 		t.Fatalf("bizdb log wrong: %+v", biz)
 	}
 	if len(biz[1].Spec.Fields) != 2 {
 		t.Fatalf("logged spec does not reflect what bizdb reported: %+v", biz[1].Spec)
 	}
-	wh, _ := c.Reports("orders", "warehouse")
+	wh, _ := c.Reports("table:orders", "warehouse")
 	if len(wh) != 1 {
 		t.Fatalf("warehouse log wrong: %+v", wh)
 	}
@@ -372,7 +408,7 @@ func TestConcurrentMultiSourceRegister(t *testing.T) {
 		t.Fatalf("concurrent register failed: %v", err)
 	}
 
-	e := mustGet(t, c, "events")
+	e := mustGet(t, c, "table:events")
 	t.Logf("input: %d sources concurrently report 1 field each -> verdict: version=%d fields=%d sources=%d",
 		n, e.Version, len(e.Fields), len(e.Sources))
 	if e.Version != n {
@@ -391,7 +427,7 @@ func TestConcurrentMultiSourceRegister(t *testing.T) {
 			t.Fatalf("field %s missing attribution: %v", name, got)
 		}
 	}
-	reps, _ := c.Reports("events", "")
+	reps, _ := c.Reports("table:events", "")
 	if len(reps) != n {
 		t.Fatalf("report log incomplete: %d of %d", len(reps), n)
 	}
